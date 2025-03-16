@@ -190,8 +190,8 @@ def plot_results(smoothing=1000, experiment='locomotion', terrain=None):
 
     if experiment == 'locomotion':
         print(terrain)
-        sar_rl_file = f'SAR-RL_results_myoLeg{terrain}TerrainWalk-v0_0/progress.csv'
-        rl_e2e_file = f'RL-E2E_results_myoLeg{terrain}TerrainWalk-v0_0/progress.csv'
+        sar_rl_file = f'SAR-RL_results_myoLegWalk-v0_0/progress.csv'
+        rl_e2e_file = f'RL-E2E_results_myoLegWalk-v0_0/progress.csv'
 
         if os.path.isfile(sar_rl_file):
             a_df = pd.read_csv(sar_rl_file)
