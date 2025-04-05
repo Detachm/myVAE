@@ -35,7 +35,7 @@ import torch
 import myosuite
 
 os.environ['MUJOCO_GL'] = 'glfw'
-warnings.filterwarnings('ignore', category=np.VisibleDeprecationWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
 plt.rcParams["font.family"] = "Latin Modern Roman"
 
 def show_video(video_path, video_width=600):
@@ -383,6 +383,105 @@ def get_vid(name, env_name, seed, episodes, video_name, determ=False,
             rs+=r
     env.close()
     skvideo.io.vwrite(f'{video_name}.mp4', np.asarray(frames),outputdict={"-pix_fmt": "yuv420p"})
+
+class VAESynNoSynWrapper(gym.ActionWrapper):
+    def __init__(self, env, vae, normalizer, phi):
+        super().__init__(env)
+
+        self.vae = vae.eval()
+        self.normalizer = normalizer
+        self.weight = phi
+
+        self.device = next(self.vae.parameters()).device
+
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, env.action_space.shape[0]).to(self.device)
+            z_mean, _ = self.vae.encode(dummy_input)
+            self.syn_act_space = z_mean.shape[1]
+
+        self.no_syn_act_space = env.action_space.shape[0]
+        self.full_act_space = self.syn_act_space + self.no_syn_act_space
+
+        self.action_space = gym.spaces.Box(
+            low=-1., high=1., shape=(self.full_act_space,), dtype=np.float32
+        )
+
+    def action(self, act):
+        syn_action = act[:self.syn_act_space]
+        no_syn_action = act[self.syn_act_space:]
+
+        #latent = self.normalizer.inverse_transform([syn_action])
+        latent_tensor = torch.tensor([syn_action], dtype=torch.float32).to(self.device)
+        
+        with torch.no_grad():
+            decoded_action = self.vae.decode(latent_tensor).cpu().numpy()[0]
+
+        final_action = self.weight * decoded_action + (1 - self.weight) * no_syn_action
+        return final_action
+
+
+def get_vid_vae(name, env_name, seed, episodes, video_name, vae, normalizer, phi, determ=False):
+    """
+    使用 VAE-SynNoSyn 模型录制 agent 在环境中的行为视频。
+
+    参数：
+    - name: 模型名称（前缀）
+    - env_name: Gym 环境名
+    - seed: 随机种子（用于定位模型和归一化器）
+    - episodes: 录制的 episode 数量
+    - video_name: 输出视频文件名（不带 .mp4）
+    - vae: 已加载的 VAE 模型
+    - normalizer: 训练时用的 StandardScaler，用于归一化
+    - phi: 协同动作与原始动作的权重比例
+    - determ: 是否使用确定性动作
+    """
+
+    frames = []
+
+    # 包装环境
+    env = VAESynNoSynWrapper(gym.make(env_name), vae, normalizer, phi)
+
+    # 设置摄像机角度
+    if 'Leg' in env_name:
+        camera = 'side_view'
+    else:
+        camera = 'front'
+
+    # 加载模型
+    model = SAC.load(f'{name}_model_{env_name}_{seed}.zip')
+    
+    # 加载 VecNormalize（需 DummyVecEnv 包装）
+    vec = VecNormalize.load(f'{name}_env_{env_name}_{seed}', DummyVecEnv([lambda: env]))
+
+    # 开始录制 episodes
+    for ep in tqdm(range(episodes), desc="Recording"):
+        obs = vec.reset()
+        done = False
+
+        while not done:
+        # 获取并归一化观测
+            norm_obs = vec.normalize_obs(env.unwrapped.get_obs())
+
+            # 预测动作
+            action, _ = model.predict(norm_obs, deterministic=determ)
+
+            # 渲染一帧图像
+            frame = env.unwrapped.sim.renderer.render_offscreen(width=640, height=480, camera_id=camera)
+            frames.append(frame)
+
+            # 执行动作并兼容 step() 返回值长度
+            step_result = env.step(action)
+            if len(step_result) == 5:
+                next_obs, reward, terminated, truncated, info = step_result
+                done = terminated or truncated
+            else:
+                next_obs, reward, done, info = step_result
+
+    env.close()
+
+    # 保存为 MP4 视频
+    skvideo.io.vwrite(f'{video_name}.mp4', np.asarray(frames), outputdict={"-pix_fmt": "yuv420p"})
+
 
 def SAR_RL(env_name, policy_name, timesteps, seed, ica=None, pca=None, normalizer=None, phi=None, syn_nosyn=False):
     """
